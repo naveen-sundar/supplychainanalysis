@@ -1,0 +1,8 @@
+Project Input:
+
+1. Plant (A-HMB) to Collection Routes with Lat & Long details shared for Seven Routes
+2. Plant (B-Karur) to Outlet Routes Lat & Long details shared for Four Routes.
+
+Expected Output:
+
+By Collecting the Lat & Long details the Collection Center or Outlet should get allocated to the Optimized Existing Routes.
