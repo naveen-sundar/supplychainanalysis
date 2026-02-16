@@ -46,9 +46,9 @@ AVG_STOP_TIME_HOURS = 10 / 60  # 10 minutes
 CC_LAT = 12.308573
 CC_LON = 78.535901
 
-# Data directory (relative to this script)
+# Data directory (relative to this script — one level up, then into csv_files)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_DIR = os.path.join(BASE_DIR, "csv_files")
+CSV_DIR = os.path.join(BASE_DIR, "..", "csv_files")
 
 
 # ─── Data Structures ────────────────────────────────────────────────────────
