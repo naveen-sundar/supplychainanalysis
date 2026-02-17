@@ -17,6 +17,8 @@ import csv
 import json
 import math
 import os
+import socket
+import time
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
@@ -146,6 +148,40 @@ def haversine_road_distance(lat1: float, lon1: float, lat2: float, lon2: float) 
 
 # --- OSRM Distance -----------------------------------------------------------
 
+# Maximum retries for OSRM API calls
+OSRM_MAX_RETRIES = 3
+OSRM_RETRY_BACKOFF = 2  # seconds, doubles each retry
+
+
+def _osrm_request(url: str, timeout: int = 30) -> dict:
+    """
+    Make an OSRM API request with automatic retry on timeout.
+
+    Args:
+        url: The full OSRM API URL.
+        timeout: Timeout in seconds per attempt.
+
+    Returns:
+        Parsed JSON response dict.
+
+    Raises:
+        RuntimeError: If all retries are exhausted.
+    """
+    last_error = None
+    for attempt in range(1, OSRM_MAX_RETRIES + 1):
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode())
+        except (urllib.error.URLError, urllib.error.HTTPError,
+                socket.timeout, ConnectionResetError) as e:
+            last_error = e
+            if attempt < OSRM_MAX_RETRIES:
+                wait = OSRM_RETRY_BACKOFF * (2 ** (attempt - 1))
+                time.sleep(wait)
+    raise RuntimeError(f"OSRM API failed after {OSRM_MAX_RETRIES} retries: {last_error}")
+
+
 def osrm_route_query(coords: List[Tuple[float, float]]) -> dict:
     """
     Query the OSRM route API for a full route.
@@ -157,7 +193,7 @@ def osrm_route_query(coords: List[Tuple[float, float]]) -> dict:
         Dict with 'distance' (km) and 'duration' (hours).
 
     Raises:
-        RuntimeError: If OSRM API call fails.
+        RuntimeError: If OSRM API call fails after retries.
     """
     if len(coords) < 2:
         return {"distance": 0.0, "duration": 0.0}
@@ -166,19 +202,14 @@ def osrm_route_query(coords: List[Tuple[float, float]]) -> dict:
     coord_str = ";".join(f"{lon},{lat}" for lat, lon in coords)
     url = f"{OSRM_BASE_URL}/route/v1/driving/{coord_str}?overview=false"
 
-    try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode())
-            if data.get("code") != "Ok":
-                raise RuntimeError(f"OSRM error: {data.get('code')}")
-            route = data["routes"][0]
-            return {
-                "distance": route["distance"] / 1000.0,  # meters to km
-                "duration": route["duration"] / 3600.0,   # seconds to hours
-            }
-    except (urllib.error.URLError, urllib.error.HTTPError, KeyError) as e:
-        raise RuntimeError(f"OSRM API request failed: {e}")
+    data = _osrm_request(url, timeout=30)
+    if data.get("code") != "Ok":
+        raise RuntimeError(f"OSRM error: {data.get('code')}")
+    route = data["routes"][0]
+    return {
+        "distance": route["distance"] / 1000.0,  # meters to km
+        "duration": route["duration"] / 3600.0,   # seconds to hours
+    }
 
 
 def osrm_table_query(coords: List[Tuple[float, float]]) -> List[List[float]]:
@@ -192,7 +223,7 @@ def osrm_table_query(coords: List[Tuple[float, float]]) -> List[List[float]]:
         2D list of distances in km: distances[i][j] = distance from i to j.
 
     Raises:
-        RuntimeError: If OSRM API call fails.
+        RuntimeError: If OSRM API call fails after retries.
     """
     if len(coords) < 2:
         return [[0.0]]
@@ -203,19 +234,14 @@ def osrm_table_query(coords: List[Tuple[float, float]]) -> List[List[float]]:
         f"?annotations=distance"
     )
 
-    try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=30) as response:
-            data = json.loads(response.read().decode())
-            if data.get("code") != "Ok":
-                raise RuntimeError(f"OSRM table error: {data.get('code')}")
-            # Convert meters to km
-            return [
-                [d / 1000.0 for d in row]
-                for row in data["distances"]
-            ]
-    except (urllib.error.URLError, urllib.error.HTTPError, KeyError) as e:
-        raise RuntimeError(f"OSRM table API request failed: {e}")
+    data = _osrm_request(url, timeout=45)
+    if data.get("code") != "Ok":
+        raise RuntimeError(f"OSRM table error: {data.get('code')}")
+    # Convert meters to km
+    return [
+        [d / 1000.0 for d in row]
+        for row in data["distances"]
+    ]
 
 
 # --- Distance Helpers ---------------------------------------------------------
