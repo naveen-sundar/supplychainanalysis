@@ -22,11 +22,19 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# In production, Tauri sets HATSUN_SCRIPT_DIR to the directory containing server.py.
+# In dev, we derive it from __file__ as usual.
+SCRIPT_DIR = os.environ.get("HATSUN_SCRIPT_DIR") or os.path.dirname(os.path.abspath(__file__))
 PYTHON = sys.executable  # Use the same Python that runs this server
 
 # SSE event queue — one per client (simplified: single client)
 event_queues = []
+
+
+@app.route("/api/health", methods=["GET"])
+def health():
+    """Simple liveness check used by the frontend to wait for server startup."""
+    return jsonify({"status": "ok"})
 
 
 def send_event(data: dict):

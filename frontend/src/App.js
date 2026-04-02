@@ -48,6 +48,8 @@ export default function App() {
   const [selectedInsertionIdx, setSelectedInsertionIdx] = useState(0);
   const [distanceMode, setDistanceMode] = useState('haversine');
   const [uploadedFileName, setUploadedFileName] = useState(null);
+  // 'waiting' | 'ready' | 'failed'
+  const [serverState, setServerState] = useState('waiting');
   const logRef = useRef(null);
   const eventSourceRef = useRef(null);
 
@@ -56,7 +58,7 @@ export default function App() {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logs]);
 
-  /* fetch initial routes on mount */
+  /* fetch initial routes once server is ready */
   const fetchRoutes = () => {
     fetch(`${API}/api/routes?t=${Date.now()}`, { cache: 'no-store' })
       .then(async r => {
@@ -64,11 +66,32 @@ export default function App() {
         return r.json();
       })
       .then(d => { setRoutes(d.routes || []); setCc(d.cc); })
-      .catch((err) => console.error("Error fetching routes:", err));
+      .catch((err) => console.error('Error fetching routes:', err));
   };
 
+  /* Poll Flask /api/health until it responds (max 20 s = 40 × 500 ms) */
   useEffect(() => {
-    fetchRoutes();
+    let attempts = 0;
+    const MAX = 40;
+    const poll = setInterval(async () => {
+      attempts++;
+      try {
+        const r = await fetch(`${API}/api/health`, { cache: 'no-store' });
+        if (r.ok) {
+          clearInterval(poll);
+          setServerState('ready');
+          fetchRoutes();
+        }
+      } catch (_) {
+        // not ready yet
+      }
+      if (attempts >= MAX) {
+        clearInterval(poll);
+        setServerState('failed');
+      }
+    }, 500);
+    return () => clearInterval(poll);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleFileUpload = async (e) => {
@@ -205,10 +228,65 @@ export default function App() {
 
   const mapCenter = cc ? [cc.lat, cc.lng] : [12.3, 78.5];
 
+  /* ── Server startup overlay ─────────────────────────────────── */
+  if (serverState === 'waiting') {
+    return (
+      <div style={{
+        display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center',
+        background: '#1e1e2e', color: '#cdd6f4', flexDirection: 'column', gap: 16
+      }}>
+        <div style={{ fontSize: 32 }}>⏳</div>
+        <div style={{ fontSize: 18, fontWeight: 600, color: '#89b4fa' }}>Starting backend server…</div>
+        <div style={{ fontSize: 13, color: '#6c7086' }}>This takes a few seconds on first launch.</div>
+      </div>
+    );
+  }
+
+  if (serverState === 'failed') {
+    const isWin = navigator.userAgent.includes('Windows');
+    const logPath = isWin
+      ? '%TEMP%\\hatsun_startup.log'
+      : '/tmp/hatsun_startup.log';
+    const dataLog = isWin
+      ? '%LOCALAPPDATA%\\HatsunVRP\\startup.log'
+      : '~/Library/Application Support/HatsunVRP/startup.log';
+    return (
+      <div style={{
+        display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center',
+        background: '#1e1e2e', color: '#cdd6f4', flexDirection: 'column', gap: 12, padding: 32
+      }}>
+        <div style={{ fontSize: 32 }}>❌</div>
+        <div style={{ fontSize: 18, fontWeight: 600, color: '#f38ba8' }}>Backend server failed to start</div>
+        <div style={{ fontSize: 13, color: '#a6adc8', textAlign: 'center', maxWidth: 520, lineHeight: 1.7 }}>
+          The Python/Flask server could not start. Common causes:
+          <ul style={{ textAlign: 'left', marginTop: 8 }}>
+            <li><b>Python not found</b> — install Python 3.9+ and tick "Add to PATH"</li>
+            <li><b>Missing packages</b> — open a terminal and run:<br />
+              <code style={{ color: '#a6e3a1' }}>pip install flask flask-cors pandas openpyxl</code></li>
+            <li><b>Antivirus</b> blocked python.exe</li>
+            <li><b>Scripts not bundled</b> — rebuild the app</li>
+          </ul>
+          <b>Debug log (primary):</b><br />
+          <code style={{ color: '#f9e2af', fontSize: 12 }}>{logPath}</code><br /><br />
+          <b>Debug log (copy):</b><br />
+          <code style={{ color: '#f9e2af', fontSize: 12 }}>{dataLog}</code>
+        </div>
+        <button onClick={() => window.location.reload()}
+          style={{
+            marginTop: 8, padding: '8px 20px', background: '#89b4fa', color: '#1e1e2e',
+            border: 'none', borderRadius: 6, fontWeight: 600, cursor: 'pointer', fontSize: 14
+          }}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', height: '100vh', fontFamily: 'system-ui, sans-serif' }}>
 
       {/* ── Sidebar ─────────────────────────────────────────────────────── */}
+
       <div style={{
         width: 400, minWidth: 360, background: '#1e1e2e', color: '#cdd6f4',
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
