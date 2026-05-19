@@ -37,6 +37,32 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@app.route("/api/has-data", methods=["GET"])
+def has_data():
+    """Tell the frontend whether any uploaded route data is available.
+
+    Returns {"has_uploaded": true} only when an explicit upload has been
+    made.  The bundled static CSVs intentionally do NOT count — we want the
+    map to start blank until the user provides their own data.
+    """
+    # Check the in-process override first (set after a /api/upload call)
+    if route_optimizer.UPLOADED_CSV_PATH and os.path.exists(route_optimizer.UPLOADED_CSV_PATH):
+        return jsonify({"has_uploaded": True})
+
+    # Check HATSUN_DATA_DIR — the production upload destination
+    data_dir = os.environ.get("HATSUN_DATA_DIR")
+    if data_dir:
+        if os.path.exists(os.path.join(data_dir, "Uploaded_Unified_Route_Data.csv")):
+            return jsonify({"has_uploaded": True})
+
+    # Check the dev upload destination (reuse SCRIPT_DIR which is already set at module level)
+    dev_path = os.path.join(SCRIPT_DIR, "..", "csv_files", "Uploaded_Unified_Route_Data.csv")
+    if os.path.exists(dev_path):
+        return jsonify({"has_uploaded": True})
+
+    return jsonify({"has_uploaded": False})
+
+
 def send_event(data: dict):
     """Push an event to all connected SSE clients."""
     msg = json.dumps(data)
@@ -102,9 +128,12 @@ def upload_csv():
             else:
                 file.save(filepath)
 
-            # Tell route_optimizer where to find the uploaded file
+            # Clear any stale cached path so a fresh load always happens.
+            # This prevents a second upload from reusing the first file's data.
+            route_optimizer.UPLOADED_CSV_PATH = None
+            # Now point to the newly saved file and reload.
             route_optimizer.UPLOADED_CSV_PATH = filepath
-            # Reparse to load the new CC coordinates globally into memory
+            # Re-parse: updates CC_LAT/CC_LON globals and validates the file.
             route_optimizer.load_route_data()
             return jsonify({"status": "success", "saved_to": filepath})
     except Exception as e:

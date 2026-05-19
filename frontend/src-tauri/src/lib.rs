@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -206,20 +206,29 @@ pub fn run() {
             // ── Spawn Flask ────────────────────────────────────────────────
             // Use data_dir as current_dir (always writable, never UNC).
             // Pass script_dir via env var so server.py knows where to find itself.
+            // Redirect Flask stdout+stderr to flask.log so Python import errors
+            // and crash tracebacks are captured rather than silently discarded.
             log(&format!("spawning: {} {:?}", python_exe, server_path));
             log(&format!("current_dir: {:?}", data_dir));
+
+            let flask_log_path = data_dir.join("flask.log");
+            let flask_log_file = std::fs::OpenOptions::new()
+                .create(true).write(true).truncate(true)
+                .open(&flask_log_path)
+                .expect("cannot open flask.log");
+            let flask_log_stderr = flask_log_file.try_clone().expect("clone flask log fd");
 
             match Command::new(&python_exe)
                 .arg(&server_path)
                 .current_dir(&data_dir)          // writable, no UNC prefix
                 .env("HATSUN_DATA_DIR", &data_dir)
                 .env("HATSUN_SCRIPT_DIR", &script_dir)
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
+                .stdout(Stdio::from(flask_log_file))
+                .stderr(Stdio::from(flask_log_stderr))
                 .spawn()
             {
                 Ok(child) => {
-                    log(&format!("Flask started PID={}", child.id()));
+                    log(&format!("Flask started PID={} — see {:?} for Flask output", child.id(), flask_log_path));
                     if let Ok(mut guard) = FLASK_PROCESS.lock() {
                         *guard = Some(child);
                     }

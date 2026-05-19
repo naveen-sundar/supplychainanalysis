@@ -33,9 +33,9 @@ function FitBounds({ positions }) {
 
 /* ── Main App ────────────────────────────────────────────────────────────── */
 export default function App() {
-  const [lat, setLat] = useState('12.35');
-  const [lon, setLon] = useState('78.55');
-  const [milkQty, setMilkQty] = useState('0');
+  const [lat, setLat] = useState('');
+  const [lon, setLon] = useState('');
+  const [milkQty, setMilkQty] = useState('');
   const [runType, setRunType] = useState('insertion');
   const [logs, setLogs] = useState([]);
   const [status, setStatus] = useState('idle');
@@ -80,7 +80,14 @@ export default function App() {
         if (r.ok) {
           clearInterval(poll);
           setServerState('ready');
-          fetchRoutes();
+          // Only load routes if the user has already uploaded a file.
+          // This prevents the bundled static CSV data from appearing
+          // on the map before any file has been provided.
+          try {
+            const dr = await fetch(`${API}/api/has-data`, { cache: 'no-store' });
+            const dj = await dr.json();
+            if (dj.has_uploaded) fetchRoutes();
+          } catch (_) { /* has-data failing is non-fatal */ }
         }
       } catch (_) {
         // not ready yet

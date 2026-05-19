@@ -14,6 +14,10 @@ DISTANCE_MODE = "osrm"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_DIR = os.path.join(BASE_DIR, "..", "csv_files")
 
+# Points to an uploaded CSV when set — mirrors route_optimizer.UPLOADED_CSV_PATH.
+# In production the env var HATSUN_DATA_DIR is authoritative (set by Tauri).
+UPLOADED_CSV_PATH = None
+
 @dataclass
 class HMB:
     sap_code: str; name: str; lat: float; lon: float; sequence: int; distance_km: float
@@ -111,28 +115,23 @@ def _load_unified_route_data(csv_path):
                          summary.get(code, {}).get("milk_qty", 0.0))
                    for code, d in route_hmbs.items()], key=lambda r: r.code)
 
-def load_route_summary():
-    routes_info = {}
-    summary_path = os.path.join(CSV_DIR, "HMB Details_Summary.csv")
-    if not os.path.exists(summary_path):
-        return routes_info
-    with open(summary_path, "r", encoding="utf-8") as f:
-        reader = csv.reader(f); next(reader)
-        for row in reader:
-            if not row or not row[0].strip() or row[0].strip() == "Grand Total": continue
-            code = row[2].strip() if len(row) > 2 else ""
-            if code.startswith("M"):
-                routes_info[code] = {
-                    "route_name": row[3].strip() if len(row)>3 else "",
-                    "capacity": int(float(row[8])) if len(row)>8 and row[8].strip() else 0,
-                    "milk_qty": float(row[9]) if len(row)>9 and row[9].strip() else 0.0,
-                }
-    return routes_info
-
-def _load_legacy_route_data():
-    """Load from legacy HMB Details_Master Data.csv."""
-    summary = load_route_summary()
+def _load_legacy_route_data_ga():
+    """Load from legacy HMB Details_Master Data.csv (GA-local copy)."""
     route_hmbs = {}
+    summary_path = os.path.join(CSV_DIR, "HMB Details_Summary.csv")
+    summary = {}
+    if os.path.exists(summary_path):
+        with open(summary_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f); next(reader)
+            for row in reader:
+                if not row or not row[0].strip() or row[0].strip() == "Grand Total": continue
+                code = row[2].strip() if len(row) > 2 else ""
+                if code.startswith("M"):
+                    summary[code] = {
+                        "route_name": row[3].strip() if len(row) > 3 else "",
+                        "capacity": int(float(row[8])) if len(row) > 8 and row[8].strip() else 0,
+                        "milk_qty": float(row[9]) if len(row) > 9 and row[9].strip() else 0.0,
+                    }
     master_path = os.path.join(CSV_DIR, "HMB Details_Master Data.csv")
     if not os.path.exists(master_path):
         return []
@@ -146,26 +145,60 @@ def _load_legacy_route_data():
             except: continue
             try: seq, dist = int(float(seq_str)) if seq_str else 0, float(dist_str) if dist_str else 0.0
             except: continue
-            route_hmbs.setdefault(r_code, {"name": r_name, "hmbs": []})["hmbs"].append((seq, HMB(c_code, c_name, coords[0], coords[1], seq, dist)))
+            route_hmbs.setdefault(r_code, {"name": r_name, "hmbs": []})["hmbs"].append(
+                (seq, HMB(c_code, c_name, coords[0], coords[1], seq, dist)))
+    return sorted([
+        Route(code, d["name"] or summary.get(code, {}).get("route_name", ""),
+              [h for _, h in sorted(d["hmbs"], key=lambda x: x[0])],
+              summary.get(code, {}).get("capacity", 0),
+              summary.get(code, {}).get("milk_qty", 0.0))
+        for code, d in route_hmbs.items()], key=lambda r: r.code)
 
-    return sorted([Route(code, d["name"] or summary.get(code, {}).get("route_name", ""),
-                         [h for _, h in sorted(d["hmbs"], key=lambda x: x[0])],
-                         summary.get(code, {}).get("capacity", 0),
-                         summary.get(code, {}).get("milk_qty", 0.0))
-                   for code, d in route_hmbs.items()], key=lambda r: r.code)
 
 def load_route_data():
-    """Load routes: check uploaded unified CSV first, then bundled unified, then legacy."""
-    # Check for uploaded unified CSV
-    uploaded_path = os.path.join(CSV_DIR, "Uploaded_Unified_Route_Data.csv")
-    if os.path.exists(uploaded_path):
-        return _load_unified_route_data(uploaded_path)
-    # Check for bundled unified CSV
+    """
+    Priority-chain loader (mirrors route_optimizer.load_route_data):
+      1. UPLOADED_CSV_PATH module var (set when spawned via import)
+      2. HATSUN_DATA_DIR env var  -> Uploaded_Unified_Route_Data.csv  (production)
+      3. csv_files/Uploaded_Unified_Route_Data.csv                     (dev upload)
+      4. csv_files/Unified_Route_Data.csv                              (bundled)
+      5. Legacy two-file format
+    """
+    global UPLOADED_CSV_PATH
+
+    # 1. Explicit module-level override (set before import by server.py if needed)
+    if UPLOADED_CSV_PATH and os.path.exists(UPLOADED_CSV_PATH):
+        return _load_unified_route_data(UPLOADED_CSV_PATH)
+
+    # 2. Production: Tauri sets HATSUN_DATA_DIR to the writable AppData dir.
+    #    The upload endpoint saves the file there, so the GA subprocess finds it
+    #    automatically via the inherited environment variable.
+    data_dir = os.environ.get("HATSUN_DATA_DIR")
+    if data_dir:
+        appdata_path = os.path.join(data_dir, "Uploaded_Unified_Route_Data.csv")
+        if os.path.exists(appdata_path):
+            UPLOADED_CSV_PATH = appdata_path
+            return _load_unified_route_data(appdata_path)
+
+    # 3. Hardcoded AppData fallback (older builds that don't pass the env var)
+    app_data_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "com.hatsun.vrp")
+    appdata_path2 = os.path.join(app_data_dir, "Uploaded_Unified_Route_Data.csv")
+    if os.path.exists(appdata_path2):
+        UPLOADED_CSV_PATH = appdata_path2
+        return _load_unified_route_data(appdata_path2)
+
+    # 4. Dev upload destination
+    dev_uploaded = os.path.join(CSV_DIR, "Uploaded_Unified_Route_Data.csv")
+    if os.path.exists(dev_uploaded):
+        return _load_unified_route_data(dev_uploaded)
+
+    # 5. Bundled unified CSV
     unified_path = os.path.join(CSV_DIR, "Unified_Route_Data.csv")
     if os.path.exists(unified_path):
         return _load_unified_route_data(unified_path)
-    # Fallback to legacy
-    return _load_legacy_route_data()
+
+    # 6. Legacy format
+    return _load_legacy_route_data_ga()
 
 def estimate_route_time(total_km, num_stops):
     return (total_km / AVG_SPEED_KMH) + (num_stops * AVG_STOP_TIME_HOURS)

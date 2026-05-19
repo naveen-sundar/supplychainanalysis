@@ -595,12 +595,14 @@ def build_route_coords(route: Route) -> List[Tuple[float, float]]:
 def calculate_route_distance(route: Route, mode: str = "haversine") -> float:
     """
     Calculate total route distance using GPS coordinates.
+    Always uses Haversine — OSRM is only used for the distance matrix inside
+    2-opt / GA, not for individual route display queries.
     CC -> HMB1 -> HMB2 -> ... -> HMBn -> CC
     """
     if not route.hmbs:
         return 0.0
     coords = build_route_coords(route)
-    return calculate_route_distance_from_coords(coords, mode)
+    return calculate_route_distance_from_coords(coords, "haversine")
 
 
 def estimate_route_time(total_km: float, num_stops: int) -> float:
@@ -679,7 +681,7 @@ def _total_distance_from_matrix(
 def optimize_2opt(
     coords: List[Tuple[float, float]],
     mode: str = "haversine",
-) -> Tuple[List[Tuple[float, float]], float]:
+) -> Tuple[List[Tuple[float, float]], float, dict]:
     """
     Apply 2-opt improvement to a route.
 
@@ -694,12 +696,18 @@ def optimize_2opt(
         mode: Distance calculation mode.
 
     Returns:
-        Tuple of (improved_coords, improved_distance).
+        Tuple of (improved_coords, improved_distance, distance_matrix).
+        The distance_matrix is returned so callers can compute additional
+        distances (e.g. pre-2opt km) without making another API call.
     """
     if len(coords) <= 3:
         # 0 or 1 intermediate stops -- nothing to optimize
-        dist = calculate_route_distance_from_coords(coords, mode)
-        return coords, dist
+        if mode == "osrm":
+            matrix = _build_distance_matrix_osrm(coords)
+        else:
+            matrix = _build_distance_matrix_haversine(coords)
+        dist = _total_distance_from_matrix(coords, matrix)
+        return coords, dist, matrix
 
     # Build distance matrix (1 API call for OSRM, local for haversine)
     if mode == "osrm":
@@ -728,7 +736,7 @@ def optimize_2opt(
                     best_distance = new_distance
                     improved = True
 
-    return best_coords, best_distance
+    return best_coords, best_distance, matrix
 
 
 # --- Capacity Pre-Filter ------------------------------------------------------
@@ -797,10 +805,12 @@ def calculate_insertion_cost(route: Route, new_lat: float, new_lon: float,
 
     Step 1: Use Haversine to quickly scan all positions (even in OSRM mode).
     Step 2: Insert at the best position found.
-    Step 3: Apply 2-opt (uses OSRM table API if in OSRM mode -- single call).
-    Step 4: Get final route distance (OSRM batch if in OSRM mode -- single call).
+    Step 3: Apply 2-opt (uses OSRM table API if in OSRM mode -- 1 call total).
+    Step 4: Read pre/post distances directly from the cached table matrix.
 
-    This minimizes OSRM API calls to just 2 per route (table + route).
+    OSRM calls per route: exactly 1 (the table query inside optimize_2opt).
+    All other distances use haversine or the table matrix — no individual
+    osrm_route_query() calls.
 
     Args:
         route: The route to evaluate
@@ -858,21 +868,14 @@ def calculate_insertion_cost(route: Route, new_lat: float, new_lon: float,
         inserted_coords.append((lat, lon))
     inserted_coords.append((CC_LAT, CC_LON))
 
-    # STEP 3: 2-opt improvement (for OSRM: uses table API -- 1 call)
-    optimized_coords, optimized_dist = optimize_2opt(inserted_coords, mode)
+    # STEP 3: 2-opt improvement.
+    # For OSRM mode: optimize_2opt builds a table matrix (1 API call) and runs
+    # 2-opt entirely on that cached matrix — no further API calls are made.
+    # The matrix is returned so we can compute pre-2opt km from it for free.
+    optimized_coords, optimized_dist, _matrix = optimize_2opt(inserted_coords, mode)
 
-    # If in OSRM mode, the optimized_dist came from the table matrix.
-    # Get the precise route distance via OSRM route API for the final order.
-    if mode == "osrm":
-        result = osrm_route_query(optimized_coords)
-        optimized_dist = result["distance"]
-
-    # Also compute pre-2opt distance in the chosen mode
-    if mode == "osrm":
-        pre_result = osrm_route_query(inserted_coords)
-        pre_2opt_dist = pre_result["distance"]
-    else:
-        pre_2opt_dist = calculate_route_distance_from_coords(inserted_coords, "haversine")
+    # Compute pre-2opt distance from the same matrix — zero extra API calls.
+    pre_2opt_dist = _total_distance_from_matrix(inserted_coords, _matrix)
 
     # Extract stop names from optimized order
     optimized_names = []
@@ -883,8 +886,7 @@ def calculate_insertion_cost(route: Route, new_lat: float, new_lon: float,
     opt_time = estimate_route_time(optimized_dist, num_stops_count)
 
     best_result.new_total_km = round(pre_2opt_dist, 2)
-    best_result.extra_km = round(pre_2opt_dist - calculate_route_distance(route, mode)
-                                 if mode == "osrm" else best_result.extra_km, 2)
+    best_result.extra_km = round(pre_2opt_dist - calculate_route_distance(route, "haversine"), 2)
     best_result.post_2opt_km = round(optimized_dist, 2)
     best_result.improvement_km = round(pre_2opt_dist - optimized_dist, 2)
     best_result.optimized_stop_order = optimized_names
